@@ -79,22 +79,20 @@ static esp_err_t wifi_sta_connect(void)
 }
 
 // ---------------------------------------------------------------- HTML page
-// Single-quoted HTML attributes + single-quoted JS strings (no apostrophes in
-// hint text) so the whole page is one un-escaped C string. All dependency
-// logic (linked fields, grey-out, hints) runs client-side in recompute().
 
 static const char PAGE[] =
 "<!doctype html><html><head>"
 "<meta name='viewport' content='width=device-width,initial-scale=1'>"
 "<title>shopsmartfan</title>"
 "<style>"
-"body{font-family:sans-serif;max-width:600px;margin:1em auto;padding:0 1em;color:#222}"
-"h2,h3{margin:.5em 0 .2em}legend{font-weight:bold}"
-".row{display:flex;align-items:center;gap:.5em;margin:.35em 0}"
+"body{font-family:sans-serif;max-width:620px;margin:1em auto;padding:0 1em;color:#222}"
+"h2{margin:.3em 0}legend{font-weight:bold}"
+".row{display:flex;align-items:center;gap:.5em;margin:.35em 0;flex-wrap:wrap}"
 ".row>label:first-child{flex:0 0 11em}"
 "input,select{font-size:1em;padding:.35em}input[type=number]{width:7em}"
 "input:disabled,select:disabled{background:#e9e9f2;color:#999}"
 "#st{background:#eee;padding:.6em;border-radius:6px;margin:.4em 0}"
+"#prev{background:#eef;padding:.5em;border-radius:6px;margin:.4em 0}"
 ".hint{color:#888;font-size:.85em}"
 "button{font-size:1em;padding:.5em 1em;margin:.3em .2em 0 0}"
 "fieldset{border:1px solid #ccc;border-radius:6px;margin:.7em 0;padding:.4em .8em}"
@@ -110,46 +108,48 @@ static const char PAGE[] =
 "<div class='row'><label>Microsteps</label>"
 "<select id='usteps' title='Sets CHOPCONF.MRES. One rev = 200 x microsteps pulses, so changing this rescales step-rate and acceleration.'>"
 "<option>1</option><option>2</option><option>4</option><option>8</option><option selected>16</option></select></div>"
-
 "<div class='row'><label><input type='checkbox' id='maxT'> Max torque</label>"
-"<span class='hint'>pins current to rated 1.5 A and locks the field</span></div>"
+"<span class='hint'>pins current to rated 1.5 A</span></div>"
 "<div class='row'><label>Run current (mA)</label>"
 "<input type='number' id='cur' value='1500' min='0' max='1770' "
-"title='RMS run current. Torque is ~proportional to current up to rated 1.5 A. Hardware ceiling ~1770 mA (0.11 ohm sense resistor).'></div>"
+"title='RMS run current. Torque ~proportional to current up to rated 1.5 A. Hardware ceiling ~1770 mA.'></div>"
 "<div class='row'><label>Holding torque</label>"
 "<input type='number' id='tq' disabled title='Derived: ~40 N-cm at rated 1.5 A, scaled by current / 1500.'>"
-"<span class='hint'>N-cm (derived from current)</span></div>"
-
+"<span class='hint'>N-cm (derived)</span></div>"
 "<div class='row'><label>Speed input as</label>"
-"<select id='spDrv' title='Pick which field you type. The other is computed from it and microsteps.'>"
-"<option value='rps'>rev/s</option><option value='sps'>steps/s</option></select></div>"
+"<select id='spDrv'><option value='rps'>rev/s</option><option value='sps'>steps/s</option></select></div>"
 "<div class='row'><label>Speed (rev/s)</label>"
-"<input type='number' id='rps' step='0.05' value='1.25' title='Revolutions per second. step-rate = rev/s x 200 x microsteps.'></div>"
+"<input type='number' id='rps' step='0.05' value='1.25' title='step-rate = rev/s x 200 x microsteps.'></div>"
 "<div class='row'><label>Step rate (steps/s)</label>"
-"<input type='number' id='sps' title='STEP pulses per second = rev/s x 200 x microsteps.'></div>"
-
+"<input type='number' id='sps' title='STEP pulses/s = rev/s x 200 x microsteps.'></div>"
 "<div class='row'><label>Accel input as</label>"
-"<select id='acDrv' title='Pick which acceleration field you type; the other is computed from it and microsteps.'>"
-"<option value='rps'>rev/s^2</option><option value='sps'>steps/s^2</option></select></div>"
+"<select id='acDrv'><option value='rps'>rev/s^2</option><option value='sps'>steps/s^2</option></select></div>"
 "<div class='row'><label>Accel (rev/s^2)</label>"
-"<input type='number' id='arps' step='0.1' value='2.5' title='Used by the move ramp (full action builder lands in Phase 3).'></div>"
+"<input type='number' id='arps' step='0.1' value='2.5' title='Used when Action acceleration = custom.'></div>"
 "<div class='row'><label>Accel (steps/s^2)</label>"
 "<input type='number' id='asps' title='= rev/s^2 x 200 x microsteps.'></div>"
-
 "<div class='row'><label>Chopper</label>"
-"<select id='chop' title='SpreadCycle = more torque under load. StealthChop = quieter, softer.'>"
-"<option value='spread' selected>SpreadCycle</option><option value='stealth'>StealthChop</option></select></div>"
-
-"<button onclick='applyCfg()'>Apply to driver</button>"
-"<span class='hint'>greyed fields are computed from others &mdash; hover any field for its formula</span>"
+"<select id='chop'><option value='spread' selected>SpreadCycle</option><option value='stealth'>StealthChop</option></select></div>"
+"<span class='hint'>greyed = computed from other fields; hover for the formula</span>"
 "</fieldset>"
 
-"<fieldset><legend>Move</legend>"
-"<div class='row'><label>Distance</label>"
+"<fieldset><legend>Action</legend>"
+"<div class='row'><label>Acceleration</label>"
+"<label><input type='radio' name='acm' value='none'> none</label>"
+"<label><input type='radio' name='acm' value='def' checked> default</label>"
+"<label><input type='radio' name='acm' value='cus'> custom</label></div>"
+"<div class='row'><label>Move type</label>"
+"<select id='mtype' title='Relative: turn this far from here. To position: go to an absolute position from the zero you set.'>"
+"<option value='rel'>relative distance</option><option value='abs'>to position</option></select></div>"
+"<div class='row'><label id='dlbl'>Distance</label>"
 "<input type='number' id='dist' step='0.05' value='2.75'>"
 "<select id='unit'><option value='rev'>rev</option><option value='deg'>deg</option><option value='rad'>rad</option></select></div>"
-"<button onclick='go(1)'>Move CW</button><button onclick='go(-1)'>Move CCW</button>"
-"<div class='hint'>uses the speed/microsteps applied above</div>"
+"<div class='row' id='dirRow'><label>Direction</label>"
+"<label><input type='radio' name='dir' value='1' checked> CW</label>"
+"<label><input type='radio' name='dir' value='-1'> CCW</label></div>"
+"<div id='prev'>preview...</div>"
+"<button onclick='execAction()'>Execute</button>"
+"<button onclick='zero()'>Set zero (closed)</button>"
 "</fieldset>"
 
 "<script>"
@@ -157,30 +157,54 @@ static const char PAGE[] =
 "function us(){return parseInt(document.getElementById('usteps').value);}"
 "function n(id){return parseFloat(document.getElementById(id).value)||0;}"
 "function setv(id,v){document.getElementById(id).value=Math.round(v*1000)/1000;}"
-"function lock(id,on){let e=document.getElementById(id);e.disabled=on;}"
+"function lock(id,on){document.getElementById(id).disabled=on;}"
+"function rad(name){let e=document.querySelector('input[name='+name+']:checked');return e?e.value:null;}"
+"function distRev(){let d=n('dist'),u=document.getElementById('unit').value;"
+"return u=='deg'?d/360:(u=='rad'?d/(2*Math.PI):d);}"
+"function accel(){let m=rad('acm');if(m=='none')return Infinity;if(m=='cus')return n('asps');"
+"return 5*FULL*us();}"  // default 5 rev/s^2
 "function recompute(){"
 " let m=us();"
-" let sd=document.getElementById('spDrv').value;"
-" lock('rps',sd!='rps');lock('sps',sd!='sps');"
+" let sd=document.getElementById('spDrv').value;lock('rps',sd!='rps');lock('sps',sd!='sps');"
 " if(sd=='rps')setv('sps',n('rps')*FULL*m);else setv('rps',n('sps')/(FULL*m));"
-" let ad=document.getElementById('acDrv').value;"
-" lock('arps',ad!='rps');lock('asps',ad!='sps');"
+" let ad=document.getElementById('acDrv').value;lock('arps',ad!='rps');lock('asps',ad!='sps');"
 " if(ad=='rps')setv('asps',n('arps')*FULL*m);else setv('arps',n('asps')/(FULL*m));"
-" let mt=document.getElementById('maxT').checked;"
-" lock('cur',mt);if(mt)document.getElementById('cur').value=1500;"
+" let mt=document.getElementById('maxT').checked;lock('cur',mt);if(mt)document.getElementById('cur').value=1500;"
 " setv('tq',40*n('cur')/1500);"
+" let abs=document.getElementById('mtype').value=='abs';"
+" document.getElementById('dlbl').textContent=abs?'Target position':'Distance';"
+" document.getElementById('dirRow').style.display=abs?'none':'flex';"
+" preview();"
 "}"
-"['usteps','spDrv','acDrv','maxT','rps','sps','arps','asps','cur'].forEach(function(id){"
+"function preview(){"
+" let m=us(),pulses=Math.abs(distRev())*FULL*m,v0=200,vc=n('sps'),a=accel();"
+" let ramp=(a>0&&isFinite(a)&&vc>v0)?(vc*vc-v0*v0)/(2*a):0;if(ramp>pulses/2)ramp=pulses/2;"
+" let peak=(ramp<pulses/2)?vc:Math.sqrt(v0*v0+2*a*(pulses/2));"
+" let tr=(a>0&&isFinite(a))?2*(peak-v0)/a:0;"
+" let cp=pulses-2*ramp,tc=cp>0?cp/vc:0,t=tr+tc;"
+" document.getElementById('prev').textContent="
+"  Math.round(pulses)+' pulses  |  ramp '+(ramp/(FULL*m)).toFixed(2)+' rev  |  peak '"
+"  +(peak/(FULL*m)).toFixed(2)+' rev/s  |  ~'+t.toFixed(1)+' s';"
+"}"
+"['usteps','spDrv','acDrv','maxT','rps','sps','arps','asps','cur','dist','unit','mtype'].forEach(function(id){"
 " let e=document.getElementById(id);e.addEventListener('input',recompute);e.addEventListener('change',recompute);});"
+"document.querySelectorAll('input[name=acm]').forEach(function(e){e.addEventListener('change',preview);});"
 "async function st(){try{let j=await(await fetch('/api/status')).json();"
 "document.getElementById('st').textContent='position (pulses): '+j.position_pulses;}catch(e){}}"
-"async function applyCfg(){let q='usteps='+us()+'&current='+Math.round(n('cur'))"
-"+'&cruise_sps='+Math.round(n('sps'))+'&chop='+document.getElementById('chop').value;"
-"await fetch('/api/config?'+q,{method:'POST'});document.getElementById('st').textContent='config applied';setTimeout(st,400);}"
-"async function go(sign){let d=n('dist'),u=document.getElementById('unit').value;"
-"let rev=u=='deg'?d/360:(u=='rad'?d/(2*Math.PI):d);rev*=sign;"
-"document.getElementById('st').textContent='moving '+rev.toFixed(3)+' rev...';"
-"await fetch('/api/move?revs='+rev,{method:'POST'});st();}"
+"async function applyCfg(){let am=rad('acm');"
+"let a=am=='none'?65535:(am=='cus'?Math.round(n('asps')):0);"
+"let q='usteps='+us()+'&current='+Math.round(n('cur'))+'&cruise_sps='+Math.round(n('sps'))"
+"+'&accel_sps2='+a+'&chop='+document.getElementById('chop').value;"
+"await fetch('/api/config?'+q,{method:'POST'});}"
+"async function execAction(){await applyCfg();let m=us();"
+"if(document.getElementById('mtype').value=='abs'){"
+" let tp=Math.round(distRev()*FULL*m);"
+" document.getElementById('st').textContent='moving to '+tp+' pulses...';"
+" await fetch('/api/moveto?pulses='+tp,{method:'POST'});}"
+"else{let rev=distRev()*parseInt(rad('dir'));"
+" document.getElementById('st').textContent='moving '+rev.toFixed(3)+' rev...';"
+" await fetch('/api/move?revs='+rev,{method:'POST'});}st();}"
+"async function zero(){await fetch('/api/zero',{method:'POST'});st();}"
 "recompute();st();setInterval(st,3000);"
 "</script></body></html>";
 
@@ -200,18 +224,17 @@ static esp_err_t status_get(httpd_req_t *req)
     return httpd_resp_send(req, buf, n);
 }
 
-// POST /api/config?usteps=&current=&cruise_sps=&chop=spread|stealth
-// Rebuilds a motor_config_t from defaults + posted params and pushes it.
 static esp_err_t config_post(httpd_req_t *req)
 {
     motor_config_t cfg = MOTOR_CONFIG_DEFAULT;
-    char q[192], v[32];
+    char q[224], v[32];
     if (httpd_req_get_url_query_str(req, q, sizeof(q)) == ESP_OK) {
-        if (httpd_query_key_value(q, "usteps", v, sizeof(v)) == ESP_OK) cfg.microsteps = (uint8_t)atoi(v);
-        if (httpd_query_key_value(q, "current", v, sizeof(v)) == ESP_OK) cfg.run_current_ma = (uint16_t)atoi(v);
-        if (httpd_query_key_value(q, "cruise_sps", v, sizeof(v)) == ESP_OK) cfg.cruise_sps = (uint16_t)atoi(v);
-        if (httpd_query_key_value(q, "start_sps", v, sizeof(v)) == ESP_OK) cfg.start_sps = (uint16_t)atoi(v);
-        if (httpd_query_key_value(q, "chop", v, sizeof(v)) == ESP_OK)
+        if (httpd_query_key_value(q, "usteps",     v, sizeof(v)) == ESP_OK) cfg.microsteps     = (uint8_t)atoi(v);
+        if (httpd_query_key_value(q, "current",    v, sizeof(v)) == ESP_OK) cfg.run_current_ma = (uint16_t)atoi(v);
+        if (httpd_query_key_value(q, "cruise_sps", v, sizeof(v)) == ESP_OK) cfg.cruise_sps     = (uint16_t)atoi(v);
+        if (httpd_query_key_value(q, "start_sps",  v, sizeof(v)) == ESP_OK) cfg.start_sps      = (uint16_t)atoi(v);
+        if (httpd_query_key_value(q, "accel_sps2", v, sizeof(v)) == ESP_OK) cfg.accel_sps2     = (uint32_t)strtoul(v, NULL, 10);
+        if (httpd_query_key_value(q, "chop",       v, sizeof(v)) == ESP_OK)
             cfg.chop = (strcmp(v, "stealth") == 0) ? MOTOR_CHOP_STEALTH : MOTOR_CHOP_SPREAD;
     }
     motor_configure(&cfg);
@@ -227,14 +250,33 @@ static esp_err_t move_post(httpd_req_t *req)
         httpd_query_key_value(q, "revs", v, sizeof(v)) == ESP_OK) {
         revs = strtof(v, NULL);
     }
-    motor_move_revs(revs);   // Phase 1/2: blocks the handler during the move
-
-    char buf[112];
-    int n = snprintf(buf, sizeof(buf),
-                     "{\"ok\":true,\"moved_revs\":%.3f,\"position_pulses\":%ld}",
-                     revs, (long)motor_position_pulses());
+    motor_move_revs(revs);
     httpd_resp_set_type(req, "application/json");
+    char buf[112];
+    int n = snprintf(buf, sizeof(buf), "{\"ok\":true,\"position_pulses\":%ld}", (long)motor_position_pulses());
     return httpd_resp_send(req, buf, n);
+}
+
+static esp_err_t moveto_post(httpd_req_t *req)
+{
+    long target = 0;
+    char q[64], v[32];
+    if (httpd_req_get_url_query_str(req, q, sizeof(q)) == ESP_OK &&
+        httpd_query_key_value(q, "pulses", v, sizeof(v)) == ESP_OK) {
+        target = strtol(v, NULL, 10);
+    }
+    motor_move_to_pulses((int32_t)target);
+    httpd_resp_set_type(req, "application/json");
+    char buf[112];
+    int n = snprintf(buf, sizeof(buf), "{\"ok\":true,\"position_pulses\":%ld}", (long)motor_position_pulses());
+    return httpd_resp_send(req, buf, n);
+}
+
+static esp_err_t zero_post(httpd_req_t *req)
+{
+    motor_zero();
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, "{\"ok\":true,\"position_pulses\":0}", HTTPD_RESP_USE_STRLEN);
 }
 
 static esp_err_t start_http(void)
@@ -245,14 +287,17 @@ static esp_err_t start_http(void)
     esp_err_t err = httpd_start(&server, &cfg);
     if (err != ESP_OK) return err;
 
-    httpd_uri_t root   = { .uri = "/",            .method = HTTP_GET,  .handler = root_get };
-    httpd_uri_t status = { .uri = "/api/status",  .method = HTTP_GET,  .handler = status_get };
-    httpd_uri_t config = { .uri = "/api/config",  .method = HTTP_POST, .handler = config_post };
-    httpd_uri_t move   = { .uri = "/api/move",    .method = HTTP_POST, .handler = move_post };
-    httpd_register_uri_handler(server, &root);
-    httpd_register_uri_handler(server, &status);
-    httpd_register_uri_handler(server, &config);
-    httpd_register_uri_handler(server, &move);
+    httpd_uri_t uris[] = {
+        { .uri = "/",            .method = HTTP_GET,  .handler = root_get },
+        { .uri = "/api/status", .method = HTTP_GET,  .handler = status_get },
+        { .uri = "/api/config", .method = HTTP_POST, .handler = config_post },
+        { .uri = "/api/move",   .method = HTTP_POST, .handler = move_post },
+        { .uri = "/api/moveto", .method = HTTP_POST, .handler = moveto_post },
+        { .uri = "/api/zero",   .method = HTTP_POST, .handler = zero_post },
+    };
+    for (size_t i = 0; i < sizeof(uris) / sizeof(uris[0]); i++) {
+        httpd_register_uri_handler(server, &uris[i]);
+    }
 
     ESP_LOGI(TAG, "HTTP server started");
     return ESP_OK;

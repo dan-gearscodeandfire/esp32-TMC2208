@@ -128,8 +128,20 @@ void motor_move_pulses(int32_t pulses)
     const int dir = (pulses > 0) ? 1 : 0;
     const uint32_t n = (pulses > 0) ? (uint32_t)pulses : (uint32_t)(-pulses);
 
-    uint32_t ramp = s_cfg.accel_pulses;
-    if (ramp == 0) ramp = (uint32_t)s_cfg.microsteps * MOTOR_FULLSTEPS_REV / 2;  // half rev
+    // Ramp length (in pulses) from the requested acceleration, via kinematics
+    // v^2 = v0^2 + 2*a*d  ->  d = (vc^2 - v0^2) / (2a), with d,v,a in step units.
+    // accel_sps2 == 0 selects a sensible default (5 rev/s^2 scaled by microsteps);
+    // a very large accel makes the ramp ~0 ("no acceleration").
+    uint32_t v0 = s_cfg.start_sps, vc = s_cfg.cruise_sps;
+    if (vc < v0) vc = v0;
+    uint32_t accel = s_cfg.accel_sps2
+                   ? s_cfg.accel_sps2
+                   : (uint32_t)(5.0f * MOTOR_FULLSTEPS_REV * s_cfg.microsteps);
+    uint32_t ramp = 0;
+    if (accel > 0 && vc > v0) {
+        uint64_t dv2 = (uint64_t)vc * vc - (uint64_t)v0 * v0;
+        ramp = (uint32_t)(dv2 / (2ULL * accel));
+    }
     if (ramp > n / 2) ramp = n / 2;
 
     uint32_t slow = sps_to_half_us(s_cfg.start_sps);
@@ -179,6 +191,11 @@ void motor_zero(void)
 }
 
 int32_t motor_position_pulses(void) { return s_pos; }
+
+void motor_move_to_pulses(int32_t target_pulses)
+{
+    motor_move_pulses(target_pulses - s_pos);
+}
 
 void motor_open(void)
 {

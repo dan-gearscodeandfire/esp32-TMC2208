@@ -21,7 +21,8 @@ typedef struct {
     motor_chop_t chop;            // chopper mode
     uint16_t     start_sps;       // start/stop pulse rate (pull-in) — keep low
     uint16_t     cruise_sps;      // cruise pulse rate
-    uint32_t     accel_pulses;    // pulses spent ramping; 0 => auto (half a rev)
+    uint32_t     accel_sps2;      // acceleration in steps/s^2; 0 => firmware default,
+                                  //   huge value (e.g. 0xFFFF) => effectively no ramp
 } motor_config_t;
 
 // Max-torque defaults for the vent lid — see planning_TORQUE.MD.
@@ -32,7 +33,7 @@ typedef struct {
     .chop           = MOTOR_CHOP_SPREAD, \
     .start_sps      = 200,               \
     .cruise_sps     = 1200,              \
-    .accel_pulses   = 0,                 \
+    .accel_sps2     = 0,                 \
 }
 
 #define MOTOR_TRAVEL_REVS   2.75f   // vent fully closed -> fully open
@@ -53,6 +54,7 @@ void motor_disable(void);  // EN high (de-energize; lid self-holds when parked)
 void motor_move_pulses(int32_t pulses);          // pulses = microsteps at current res
 void motor_move_steps(int32_t full_steps);       // scaled by microsteps
 void motor_move_revs(float revs);
+void motor_move_to_pulses(int32_t target_pulses); // absolute move to a position
 
 // Position-aware open/close. Require motor_zero() first to set the closed
 // reference (no endstops on this hardware — manual/homing zero).
