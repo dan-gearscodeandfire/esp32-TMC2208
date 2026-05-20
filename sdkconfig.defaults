@@ -1,0 +1,16 @@
+# Match physical flash size (4 MB Boya chip on this DevKit V1).
+# Without this, the 2nd-stage bootloader logs a size-mismatch warning at boot.
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="4MB"
+
+# Bump main task stack from 3584 → 4096. ESP_LOGI + UART transactions on the
+# same call chain leave very little headroom on the default; 4 KB gives margin.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=4096
+
+# Tick rate 1000 Hz (1 ms) for finer task scheduling. MCPWM handles step
+# generation in hardware so this doesn't gate step timing, but motor-control
+# orchestration tasks benefit from ms-granular vTaskDelay.
+CONFIG_FREERTOS_HZ=1000
+
+# Development log level. Drop to WARN or ERROR for production builds.
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
