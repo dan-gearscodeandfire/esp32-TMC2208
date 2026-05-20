@@ -1,51 +1,30 @@
-#include <stdio.h>
-#include <inttypes.h>
 #include <stdbool.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "driver/gpio.h"
-#include "esp_rom_sys.h"
 #include "esp_log.h"
 
 #include "tmc2208.h"
+#include "motor.h"
 
-// Pin map — mirrors the Hardware section of CLAUDE.md.
-#define LED_PIN   GPIO_NUM_2
-#define EN_PIN    GPIO_NUM_13   // active LOW; HIGH = driver disabled
-#define DIR_PIN   GPIO_NUM_32
-#define STEP_PIN  GPIO_NUM_33
-#define UART_TX   GPIO_NUM_26
-#define UART_RX   GPIO_NUM_27
+#define LED_PIN  GPIO_NUM_2
+#define UART_TX  GPIO_NUM_26
+#define UART_RX  GPIO_NUM_27
 
-#define PROBE_RETRY_EVERY_HEARTBEATS 10
-#define USTEP                        16
-#define STEPS_PER_REV                (200 * USTEP)   // 3200
-
-static const char *TAG = "fan";
+static const char *TAG = "app";
 static tmc2208_t s_driver;
-static bool s_uart_initialized = false;
-static bool s_phase2_passed = false;
 
-static void init_gpios(void)
-{
-    gpio_reset_pin(EN_PIN);
-    gpio_set_direction(EN_PIN, GPIO_MODE_OUTPUT);
-    gpio_set_level(EN_PIN, 1);   // disabled until configured
+// === Exposed move parameters — edit to override (definitions in motor.h) ===
+static motor_config_t s_motor_cfg = MOTOR_CONFIG_DEFAULT;
 
-    gpio_reset_pin(LED_PIN);
-    gpio_set_direction(LED_PIN, GPIO_MODE_OUTPUT);
+// On-boot demonstration move. Set false to boot straight to idle.
+static const bool s_run_demo = true;
 
-    gpio_reset_pin(DIR_PIN);
-    gpio_set_direction(DIR_PIN, GPIO_MODE_OUTPUT);
-    gpio_set_level(DIR_PIN, 0);
+// Torque demo: number of CW/CCW 2.75-rev round-trips.
+#define DEMO_CYCLES 4
 
-    gpio_reset_pin(STEP_PIN);
-    gpio_set_direction(STEP_PIN, GPIO_MODE_OUTPUT);
-    gpio_set_level(STEP_PIN, 0);
-}
-
-static esp_err_t init_tmc2208_uart(void)
+static bool probe_uart(void)
 {
     tmc2208_config_t cfg = {
         .uart_port  = UART_NUM_2,
@@ -54,138 +33,63 @@ static esp_err_t init_tmc2208_uart(void)
         .baud       = 19200,
         .slave_addr = 0x00,
     };
-    esp_err_t err = tmc2208_init(&s_driver, &cfg);
-    if (err == ESP_OK) s_uart_initialized = true;
-    else ESP_LOGE(TAG, "tmc2208_init failed: %s", esp_err_to_name(err));
-    return err;
-}
+    if (tmc2208_init(&s_driver, &cfg) != ESP_OK) return false;
 
-static void try_probe_tmc2208(void)
-{
-    if (!s_uart_initialized || s_phase2_passed) return;
-    for (uint8_t addr = 0; addr <= 3; addr++) {
-        s_driver.cfg.slave_addr = addr;
-        tmc2208_write_register(&s_driver, TMC2208_REG_GCONF, 0xC0);
-    }
-    for (uint8_t addr = 0; addr <= 3; addr++) {
-        s_driver.cfg.slave_addr = addr;
-        uint8_t ver = 0;
-        if (tmc2208_get_version(&s_driver, &ver) == ESP_OK) {
-            ESP_LOGI(TAG, "TMC2208 UART OK -- slave=0x%02x VERSION=0x%02x", addr, ver);
-            s_phase2_passed = true;
-            return;
+    uint8_t ver = 0;
+    for (uint8_t a = 0; a <= 3; a++) {
+        s_driver.cfg.slave_addr = a;
+        if (tmc2208_get_version(&s_driver, &ver) == ESP_OK && ver == 0x20) {
+            ESP_LOGI(TAG, "TMC2208 UART OK (slave 0x%02x, VERSION 0x%02x)", a, ver);
+            return true;
         }
     }
-    ESP_LOGW(TAG, "No response on any slave 0x00-0x03 -- check VM(12V)/VIO/jumper/GND");
+    return false;
 }
-
-static void log_drv_status(const char *when)
-{
-    uint32_t st = 0;
-    if (tmc2208_read_register(&s_driver, TMC2208_REG_DRV_STATUS, &st) != ESP_OK) {
-        ESP_LOGW(TAG, "DRV_STATUS %s: read failed (reads are marginal at 1k -- non-fatal)", when);
-        return;
-    }
-    ESP_LOGI(TAG, "DRV_STATUS %s = 0x%08x [ot=%d otpw=%d s2g=%d%d ol=%d%d cs=%d]",
-             when, (unsigned)st,
-             (int)((st >> 1) & 1), (int)((st >> 0) & 1),
-             (int)((st >> 2) & 1), (int)((st >> 3) & 1),
-             (int)((st >> 6) & 1), (int)((st >> 7) & 1),
-             (int)((st >> 16) & 0x1F));
-}
-
-// Trapezoidal move: linear accel over ramp_steps, cruise, linear decel.
-// half-period in microseconds: slow_us (start/end) -> fast_us (cruise).
-static void move_trapezoid(int total_steps, int dir_level,
-                           int slow_us, int fast_us, int ramp_steps)
-{
-    gpio_set_level(DIR_PIN, dir_level);
-    esp_rom_delay_us(50);
-    for (int i = 0; i < total_steps; i++) {
-        int hp;
-        if (i < ramp_steps) {
-            hp = slow_us - (slow_us - fast_us) * i / ramp_steps;          // accel
-        } else if (i >= total_steps - ramp_steps) {
-            int j = total_steps - 1 - i;
-            hp = slow_us - (slow_us - fast_us) * j / ramp_steps;          // decel
-        } else {
-            hp = fast_us;                                                  // cruise
-        }
-        gpio_set_level(STEP_PIN, 1);
-        esp_rom_delay_us(hp);
-        gpio_set_level(STEP_PIN, 0);
-        esp_rom_delay_us(hp);
-        if ((i & 0x1FF) == 0x1FF) vTaskDelay(1);   // feed WDT during long moves
-    }
-}
-
-static void motor_demo(void)
-{
-    ESP_LOGI(TAG, "=== MOTOR DEMO ===");
-
-    // ~520 mA RMS (IRUN=16, vsense=1), 16 microsteps, StealthChop, internal ref.
-    tmc2208_write_register(&s_driver, TMC2208_REG_GCONF,      0x000000C0);
-    tmc2208_write_register(&s_driver, TMC2208_REG_IHOLD_IRUN, 0x00021008);  // IHOLD=8 IRUN=16 DELAY=2
-    tmc2208_write_register(&s_driver, TMC2208_REG_CHOPCONF,   0x14030055);  // TOFF=5 MRES=16 vsense=1 intpol
-
-    uint8_t ifcnt = 0;
-    tmc2208_get_ifcnt(&s_driver, &ifcnt);
-    ESP_LOGI(TAG, "Configured (IFCNT=%d). Enabling driver.", ifcnt);
-
-    gpio_set_level(EN_PIN, 0);    // enable
-    vTaskDelay(pdMS_TO_TICKS(20));
-    log_drv_status("start");
-
-    // Profile: top speed ~1.3 rev/s (fast_us=120 -> 240us/step -> 4.2 kHz),
-    // start/stop at ~0.26 rev/s, ramp over half a revolution.
-    int cycle = 0;
-    while (1) {
-        cycle++;
-
-        gpio_set_level(LED_PIN, 1);
-        ESP_LOGI(TAG, "cycle %d: 3 rev CW", cycle);
-        move_trapezoid(3 * STEPS_PER_REV, 1, 600, 120, STEPS_PER_REV / 2);
-        gpio_set_level(LED_PIN, 0);
-        vTaskDelay(pdMS_TO_TICKS(400));
-
-        gpio_set_level(LED_PIN, 1);
-        ESP_LOGI(TAG, "cycle %d: 3 rev CCW", cycle);
-        move_trapezoid(3 * STEPS_PER_REV, 0, 600, 120, STEPS_PER_REV / 2);
-        gpio_set_level(LED_PIN, 0);
-        vTaskDelay(pdMS_TO_TICKS(400));
-
-        if (cycle % 5 == 0) log_drv_status("running");
-    }
-}
-
-// Set true to run the continuous motion demo; false keeps the motor idle/disabled.
-static const bool s_run_demo = false;
 
 void app_main(void)
 {
-    init_gpios();
-    ESP_LOGI(TAG, "GPIOs ready; EN held HIGH (TMC2208 disabled)");
+    gpio_reset_pin(LED_PIN);
+    gpio_set_direction(LED_PIN, GPIO_MODE_OUTPUT);
 
-    init_tmc2208_uart();
-    try_probe_tmc2208();
+    if (!probe_uart()) {
+        ESP_LOGE(TAG, "TMC2208 not responding -- is VM (12 V) connected? Motor logic halted.");
+    } else {
+        // Max torque within a two-tier current envelope:
+        //   peak (during the brief move): ~1.49 A (IRUN=26, under the 1.5 A max)
+        //   continuous (time-averaged):  ~0.5 A — far under 1.2 A, because the
+        //     motor is DE-ENERGIZED during the 5 s pauses (duty ~1/3).
+        // Max torque also wants LOW speed + a GENTLE ramp: at a slow step rate
+        // the winding current fully settles each step (step period > L/R), so
+        // the motor develops near its full holding torque (torque-speed curve).
+        s_motor_cfg.run_current_ma = 1500;   // -> IRUN=26, ~1.49 A peak (< 1.5 A max)
+        s_motor_cfg.start_sps      = 100;    // gentle pull-in from standstill
+        s_motor_cfg.cruise_sps     = 250;    // slow -> near holding torque
+        motor_init(&s_driver, &s_motor_cfg);
 
-    if (s_phase2_passed && s_run_demo) {
-        motor_demo();   // never returns
+        if (s_run_demo) {
+            // 2.75-rev CW, pause 5 s, 2.75-rev CCW, pause 5 s, repeated.
+            // On the bench the shaft just spins; if mounted, start near a
+            // mid/closed position so full-travel moves don't ram a hard stop.
+            // "CW" here = DIR high (+); flip the signs if your wiring is opposite.
+            ESP_LOGI(TAG, "Max-torque cycle: 2.75 rev CW, 5 s, 2.75 rev CCW, 5 s, x%d", DEMO_CYCLES);
+            for (int c = 1; c <= DEMO_CYCLES; c++) {
+                ESP_LOGI(TAG, "cycle %d/%d: 2.75 rev CW", c, DEMO_CYCLES);
+                motor_move_revs(+2.75f);
+                vTaskDelay(pdMS_TO_TICKS(5000));
+                ESP_LOGI(TAG, "cycle %d/%d: 2.75 rev CCW", c, DEMO_CYCLES);
+                motor_move_revs(-2.75f);
+                vTaskDelay(pdMS_TO_TICKS(5000));
+            }
+            ESP_LOGI(TAG, "Cycle complete; motor de-energized.");
+        }
     }
 
-    // Idle: motor stays de-energized (EN HIGH). Heartbeat so we can see it's alive.
-    gpio_set_level(EN_PIN, 1);
-    ESP_LOGI(TAG, "Motor IDLE (EN HIGH, de-energized). Demo disabled.");
     int n = 0;
     while (1) {
         gpio_set_level(LED_PIN, 1);
         vTaskDelay(pdMS_TO_TICKS(500));
         gpio_set_level(LED_PIN, 0);
         vTaskDelay(pdMS_TO_TICKS(500));
-        n++;
-        ESP_LOGI(TAG, "idle heartbeat #%d", n);
-        if (!s_phase2_passed && (n % PROBE_RETRY_EVERY_HEARTBEATS == 0)) {
-            try_probe_tmc2208();
-        }
+        ESP_LOGI(TAG, "idle heartbeat #%d", ++n);
     }
 }
