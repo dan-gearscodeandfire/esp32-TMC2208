@@ -27,6 +27,13 @@
 #define TMC2208_REG_PWM_SCALE     0x71
 #define TMC2208_REG_PWM_AUTO      0x72
 
+// TMC2209-only registers (StallGuard / CoolStep). The 2208 has no equivalents;
+// writes are harmless but reads return 0, which would look like a constant
+// stall. The motor module gates these behind a 2209 check.
+#define TMC2209_REG_TCOOLTHRS     0x14  // 20-bit; non-zero enables SG/CoolStep when TSTEP <= TCOOLTHRS
+#define TMC2209_REG_SGTHRS        0x40  // 8-bit StallGuard threshold; stall when SG_RESULT <= SGTHRS*2
+#define TMC2209_REG_SG_RESULT     0x41  // 10-bit load reading; lower = higher mechanical load
+
 typedef struct {
     uart_port_t uart_port;
     int tx_pin;

@@ -1,5 +1,7 @@
 #include "motor.h"
 
+#include <string.h>
+
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "driver/gpio.h"
@@ -17,9 +19,39 @@ static const char *TAG = "motor";
 #define RSENSE_EXTRA  0.02f   // internal parasitic resistance, per datasheet
 #define SQRT2         1.41421356f
 
-static tmc2208_t     *s_drv;
+static tmc2208_t     *s_drv;   // NULL when no UART driver is attached (legacy boards)
 static motor_config_t s_cfg;
 static int32_t        s_pos;   // position in pulses from zero
+
+// ----------------------------------------------------------- driver identity
+
+static const char *const DRIVER_TOKENS[] = {
+    [MOTOR_DRIVER_TMC2208] = "tmc2208",
+    [MOTOR_DRIVER_TMC2209] = "tmc2209",
+    [MOTOR_DRIVER_A4988]   = "a4988",
+    [MOTOR_DRIVER_DRV8825] = "drv8825",
+};
+#define DRIVER_COUNT ((int)(sizeof DRIVER_TOKENS / sizeof DRIVER_TOKENS[0]))
+
+bool motor_driver_has_uart(motor_driver_t d)
+{
+    return d == MOTOR_DRIVER_TMC2208 || d == MOTOR_DRIVER_TMC2209;
+}
+
+const char *motor_driver_token(motor_driver_t d)
+{
+    return (d >= 0 && d < DRIVER_COUNT) ? DRIVER_TOKENS[d] : "unknown";
+}
+
+motor_driver_t motor_driver_from_token(const char *tok)
+{
+    for (int i = 0; i < DRIVER_COUNT; i++) {
+        if (strcmp(tok, DRIVER_TOKENS[i]) == 0) return (motor_driver_t)i;
+    }
+    return MOTOR_DRIVER_TMC2208;
+}
+
+motor_driver_t motor_active_driver(void) { return s_cfg.driver; }
 
 // Translate a target RMS current (mA) to the TMC2208 IRUN code (0-31) and pick
 // the vsense bit. Tries vsense=1 (fine resolution, ~1 A ceiling) first; falls
@@ -62,6 +94,23 @@ void motor_configure(const motor_config_t *cfg)
 {
     s_cfg = *cfg;
 
+    if (!motor_driver_has_uart(s_cfg.driver)) {
+        // A4988 / DRV8825: no UART. Current comes from the board trimpot and
+        // microstepping from the MS jumpers — neither is software-settable.
+        // We keep s_cfg.microsteps only as a *declaration* of the jumper
+        // setting so move/ramp math (steps-per-rev) stays correct.
+        ESP_LOGI(TAG, "config: %s (STEP/DIR/EN only) -- %u ustep declared; "
+                      "set current via trimpot, microsteps via MS jumpers",
+                 motor_driver_token(s_cfg.driver), s_cfg.microsteps);
+        return;
+    }
+
+    if (s_drv == NULL) {
+        ESP_LOGW(TAG, "%s selected but no UART driver attached (VM/12 V present?); "
+                      "skipping register config", motor_driver_token(s_cfg.driver));
+        return;
+    }
+
     uint8_t vsense;
     uint8_t irun = current_to_irun(s_cfg.run_current_ma, &vsense);
     uint8_t mres = microsteps_to_mres(s_cfg.microsteps);
@@ -89,6 +138,37 @@ void motor_configure(const motor_config_t *cfg)
              s_cfg.run_current_ma, irun, vsense, s_cfg.microsteps,
              s_cfg.chop == MOTOR_CHOP_SPREAD ? "SpreadCycle" : "StealthChop",
              s_cfg.start_sps, s_cfg.cruise_sps);
+
+    // StallGuard4 is a 2209-only feature. On the 2208 these registers don't
+    // exist; we leave them alone. TCOOLTHRS gates SG/CoolStep on TSTEP: 0 = off,
+    // any non-zero = active when TSTEP <= TCOOLTHRS. For a tester we open the
+    // window wide (0xFFFFF) so SG reports during the entire cruise — the user
+    // tunes SGTHRS against the live SG_RESULT readout in the web UI.
+    if (s_cfg.driver == MOTOR_DRIVER_TMC2209) {
+        if (s_cfg.sg_threshold > 0) {
+            tmc2208_write_register(s_drv, TMC2209_REG_TCOOLTHRS, 0xFFFFFu);
+            tmc2208_write_register(s_drv, TMC2209_REG_SGTHRS,    s_cfg.sg_threshold);
+            ESP_LOGI(TAG, "StallGuard: SGTHRS=%u (stall when SG_RESULT <= %u)",
+                     s_cfg.sg_threshold, (unsigned)s_cfg.sg_threshold * 2u);
+        } else {
+            tmc2208_write_register(s_drv, TMC2209_REG_TCOOLTHRS, 0);
+            ESP_LOGI(TAG, "StallGuard: disabled (TCOOLTHRS=0)");
+        }
+    }
+}
+
+esp_err_t motor_read_sg(uint16_t *load, bool *stalled)
+{
+    if (s_cfg.driver != MOTOR_DRIVER_TMC2209 || s_drv == NULL || s_cfg.sg_threshold == 0) {
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+    uint32_t v = 0;
+    esp_err_t e = tmc2208_read_register(s_drv, TMC2209_REG_SG_RESULT, &v);
+    if (e != ESP_OK) return e;
+    uint16_t sg = (uint16_t)(v & 0x3FFu);   // SG_RESULT is bits 9:0
+    if (load)    *load    = sg;
+    if (stalled) *stalled = (sg <= (uint32_t)s_cfg.sg_threshold * 2u);
+    return ESP_OK;
 }
 
 esp_err_t motor_init(tmc2208_t *drv, const motor_config_t *cfg)
@@ -119,7 +199,12 @@ void motor_disable(void) { gpio_set_level(EN_PIN, 1); }
 static inline uint32_t sps_to_half_us(uint32_t sps)
 {
     if (sps == 0) sps = 1;
-    return 500000u / sps;   // 1e6 / (2 * sps)
+    uint32_t hp = 500000u / sps;   // 1e6 / (2 * sps)
+    // Floor each STEP half-period at 3 us so we never violate a driver's
+    // minimum pulse width (DRV8825 wants >=1.9 us high and low; A4988 >=1 us).
+    // At our pulse rates hp is hundreds of us, so this only guards extremes.
+    if (hp < 3) hp = 3;
+    return hp;
 }
 
 void motor_move_pulses(int32_t pulses)

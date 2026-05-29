@@ -105,6 +105,13 @@ static const char PAGE[] =
 "</fieldset>"
 
 "<fieldset><legend>Drive parameters</legend>"
+"<div class='row'><label>Driver</label>"
+"<select id='drv' title='Pick the driver board. TMC2208/2209 are configured over UART (current, microsteps, chopper all software-set). A4988/DRV8825 are STEP/DIR only -- set current with the board trimpot and microsteps with the MS jumpers.'>"
+"<option value='tmc2208'>TMC2208 (UART)</option>"
+"<option value='tmc2209'>TMC2209 (UART)</option>"
+"<option value='a4988'>A4988 (STEP/DIR)</option>"
+"<option value='drv8825'>DRV8825 (STEP/DIR)</option></select></div>"
+"<div class='row'><label></label><span class='hint' id='drvHint'></span></div>"
 "<div class='row'><label>Microsteps</label>"
 "<select id='usteps' title='Sets CHOPCONF.MRES. One rev = 200 x microsteps pulses, so changing this rescales step-rate and acceleration.'>"
 "<option>1</option><option>2</option><option>4</option><option>8</option><option selected>16</option></select></div>"
@@ -130,6 +137,10 @@ static const char PAGE[] =
 "<input type='number' id='asps' title='= rev/s^2 x 200 x microsteps.'></div>"
 "<div class='row'><label>Chopper</label>"
 "<select id='chop'><option value='spread' selected>SpreadCycle</option><option value='stealth'>StealthChop</option></select></div>"
+"<div class='row'><label>StallGuard threshold</label>"
+"<input type='number' id='sgthrs' value='0' min='0' max='255' "
+"title='TMC2209 only. 0 disables. Higher = more sensitive (stall declared at lighter load). Stall fires when SG_RESULT <= SGTHRS*2.'></div>"
+"<div class='row'><label></label><span class='hint' id='sgHint'></span></div>"
 "<span class='hint'>greyed = computed from other fields; hover for the formula</span>"
 "</fieldset>"
 
@@ -159,17 +170,40 @@ static const char PAGE[] =
 "function setv(id,v){document.getElementById(id).value=Math.round(v*1000)/1000;}"
 "function lock(id,on){document.getElementById(id).disabled=on;}"
 "function rad(name){let e=document.querySelector('input[name='+name+']:checked');return e?e.value:null;}"
+"function drv(){return document.getElementById('drv').value;}"
+"function hasUart(){let d=drv();return d=='tmc2208'||d=='tmc2209';}"
+// DRV8825 adds 1/32; everyone else tops out at 16. Rebuild the options on
+// driver change, preserving the current pick where it still exists.
+"function rebuildUsteps(){let s=document.getElementById('usteps'),cur=s.value;"
+"let o=(drv()=='drv8825')?[1,2,4,8,16,32]:[1,2,4,8,16];s.innerHTML='';"
+"o.forEach(function(v){let e=document.createElement('option');e.value=v;e.text=v;"
+"if(''+v==cur)e.selected=true;s.appendChild(e);});if(!s.value)s.value=o[o.length-1];}"
 "function distRev(){let d=n('dist'),u=document.getElementById('unit').value;"
 "return u=='deg'?d/360:(u=='rad'?d/(2*Math.PI):d);}"
 "function accel(){let m=rad('acm');if(m=='none')return Infinity;if(m=='cus')return n('asps');"
 "return 5*FULL*us();}"  // default 5 rev/s^2
 "function recompute(){"
 " let m=us();"
+// UART-only fields (current, max-torque, chopper) are greyed for STEP/DIR boards,
+// where current is the trimpot's job and microsteps are jumper-set.
+" let u=hasUart();"
+" document.getElementById('maxT').disabled=!u;document.getElementById('chop').disabled=!u;"
+" if(!u)document.getElementById('maxT').checked=false;"
+" document.getElementById('drvHint').textContent=u"
+"  ?'UART: current, microsteps and chopper are set in software.'"
+"  :'STEP/DIR only: set current via the board trimpot, microsteps via the MS jumpers. Microsteps below just declares the jumper setting so the math matches.';"
+// StallGuard is a TMC2209-only feature. Grey the field for everyone else and
+// explain why; clear the value on non-2209 so a stale number doesn't get POSTed.
+" let is2209=drv()=='tmc2209';"
+" let sg=document.getElementById('sgthrs');sg.disabled=!is2209;if(!is2209)sg.value=0;"
+" document.getElementById('sgHint').textContent=is2209"
+"  ?'Sensorless stall: live SG_RESULT shows in status during motion. Tune threshold against it; values at rest or early ramp are noise. 0 = off.'"
+"  :'StallGuard is a TMC2209-only feature.';"
 " let sd=document.getElementById('spDrv').value;lock('rps',sd!='rps');lock('sps',sd!='sps');"
 " if(sd=='rps')setv('sps',n('rps')*FULL*m);else setv('rps',n('sps')/(FULL*m));"
 " let ad=document.getElementById('acDrv').value;lock('arps',ad!='rps');lock('asps',ad!='sps');"
 " if(ad=='rps')setv('asps',n('arps')*FULL*m);else setv('arps',n('asps')/(FULL*m));"
-" let mt=document.getElementById('maxT').checked;lock('cur',mt);if(mt)document.getElementById('cur').value=1500;"
+" let mt=document.getElementById('maxT').checked;lock('cur',mt||!u);if(mt)document.getElementById('cur').value=1500;"
 " setv('tq',40*n('cur')/1500);"
 " let abs=document.getElementById('mtype').value=='abs';"
 " document.getElementById('dlbl').textContent=abs?'Target position':'Distance';"
@@ -186,15 +220,25 @@ static const char PAGE[] =
 "  Math.round(pulses)+' pulses  |  ramp '+(ramp/(FULL*m)).toFixed(2)+' rev  |  peak '"
 "  +(peak/(FULL*m)).toFixed(2)+' rev/s  |  ~'+t.toFixed(1)+' s';"
 "}"
-"['usteps','spDrv','acDrv','maxT','rps','sps','arps','asps','cur','dist','unit','mtype'].forEach(function(id){"
+"['usteps','spDrv','acDrv','maxT','rps','sps','arps','asps','cur','dist','unit','mtype','sgthrs'].forEach(function(id){"
 " let e=document.getElementById(id);e.addEventListener('input',recompute);e.addEventListener('change',recompute);});"
+"document.getElementById('drv').addEventListener('change',function(){rebuildUsteps();recompute();});"
 "document.querySelectorAll('input[name=acm]').forEach(function(e){e.addEventListener('change',preview);});"
+"let drvSynced=false;"
 "async function st(){try{let j=await(await fetch('/api/status')).json();"
-"document.getElementById('st').textContent='position (pulses): '+j.position_pulses;}catch(e){}}"
+"let s='position (pulses): '+j.position_pulses+'  |  driver: '+(j.driver||'?');"
+// SG_RESULT only included on 2209 with SGTHRS > 0. Lower = higher load; stall flag is
+// just (load <= sgthrs*2), evaluated on the chip side and reported by the firmware.
+"if(j.sg_load!==undefined)s+='  |  load: '+j.sg_load+'/1023'+(j.sg_stalled?'  STALL':'');"
+"document.getElementById('st').textContent=s;"
+// Adopt the driver the firmware detected at boot, once, so the form starts correct.
+"if(j.driver&&!drvSynced){drvSynced=true;document.getElementById('drv').value=j.driver;rebuildUsteps();recompute();}"
+"}catch(e){}}"
 "async function applyCfg(){let am=rad('acm');"
 "let a=am=='none'?65535:(am=='cus'?Math.round(n('asps')):0);"
-"let q='usteps='+us()+'&current='+Math.round(n('cur'))+'&cruise_sps='+Math.round(n('sps'))"
-"+'&accel_sps2='+a+'&chop='+document.getElementById('chop').value;"
+"let q='driver='+drv()+'&usteps='+us()+'&current='+Math.round(n('cur'))+'&cruise_sps='+Math.round(n('sps'))"
+"+'&accel_sps2='+a+'&chop='+document.getElementById('chop').value"
+"+'&sgthrs='+Math.round(n('sgthrs'));"
 "await fetch('/api/config?'+q,{method:'POST'});}"
 "async function execAction(){await applyCfg();let m=us();"
 "if(document.getElementById('mtype').value=='abs'){"
@@ -218,8 +262,25 @@ static esp_err_t root_get(httpd_req_t *req)
 
 static esp_err_t status_get(httpd_req_t *req)
 {
-    char buf[96];
-    int n = snprintf(buf, sizeof(buf), "{\"position_pulses\":%ld}", (long)motor_position_pulses());
+    // motor_read_sg() returns ESP_ERR_NOT_SUPPORTED on any non-2209 driver or
+    // when SG is disabled, in which case we omit sg_load/sg_stalled from the
+    // payload and the web UI hides those fields.
+    uint16_t sg_load = 0;
+    bool sg_stalled = false;
+    bool have_sg = (motor_read_sg(&sg_load, &sg_stalled) == ESP_OK);
+
+    char buf[160];
+    int n;
+    if (have_sg) {
+        n = snprintf(buf, sizeof(buf),
+                     "{\"position_pulses\":%ld,\"driver\":\"%s\",\"sg_load\":%u,\"sg_stalled\":%s}",
+                     (long)motor_position_pulses(),
+                     motor_driver_token(motor_active_driver()),
+                     (unsigned)sg_load, sg_stalled ? "true" : "false");
+    } else {
+        n = snprintf(buf, sizeof(buf), "{\"position_pulses\":%ld,\"driver\":\"%s\"}",
+                     (long)motor_position_pulses(), motor_driver_token(motor_active_driver()));
+    }
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_send(req, buf, n);
 }
@@ -227,8 +288,10 @@ static esp_err_t status_get(httpd_req_t *req)
 static esp_err_t config_post(httpd_req_t *req)
 {
     motor_config_t cfg = MOTOR_CONFIG_DEFAULT;
+    cfg.driver = motor_active_driver();   // keep current driver if none supplied
     char q[224], v[32];
     if (httpd_req_get_url_query_str(req, q, sizeof(q)) == ESP_OK) {
+        if (httpd_query_key_value(q, "driver",     v, sizeof(v)) == ESP_OK) cfg.driver         = motor_driver_from_token(v);
         if (httpd_query_key_value(q, "usteps",     v, sizeof(v)) == ESP_OK) cfg.microsteps     = (uint8_t)atoi(v);
         if (httpd_query_key_value(q, "current",    v, sizeof(v)) == ESP_OK) cfg.run_current_ma = (uint16_t)atoi(v);
         if (httpd_query_key_value(q, "cruise_sps", v, sizeof(v)) == ESP_OK) cfg.cruise_sps     = (uint16_t)atoi(v);
@@ -236,6 +299,7 @@ static esp_err_t config_post(httpd_req_t *req)
         if (httpd_query_key_value(q, "accel_sps2", v, sizeof(v)) == ESP_OK) cfg.accel_sps2     = (uint32_t)strtoul(v, NULL, 10);
         if (httpd_query_key_value(q, "chop",       v, sizeof(v)) == ESP_OK)
             cfg.chop = (strcmp(v, "stealth") == 0) ? MOTOR_CHOP_STEALTH : MOTOR_CHOP_SPREAD;
+        if (httpd_query_key_value(q, "sgthrs",     v, sizeof(v)) == ESP_OK) cfg.sg_threshold   = (uint8_t)atoi(v);
     }
     motor_configure(&cfg);
     httpd_resp_set_type(req, "application/json");

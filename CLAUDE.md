@@ -4,7 +4,25 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-Embedded firmware for an ESP32 driving a TMC2208 stepper driver. **Built with ESP-IDF** (CMake-based, `main/` component). The original Arduino sketch `shopsmartfan.ino` is preserved at the repo root as a porting reference — it is **not** part of the ESP-IDF build (`idf.py` only picks up sources listed in `main/CMakeLists.txt`).
+Embedded firmware for an ESP32 stepper-driver **bench tester** (and the RV vent-lid opener it grew out of). **Built with ESP-IDF** (CMake-based, `main/` component). The original Arduino sketch `shopsmartfan.ino` is preserved at the repo root as a porting reference — it is **not** part of the ESP-IDF build (`idf.py` only picks up sources listed in `main/CMakeLists.txt`).
+
+### Multi-driver support
+
+The firmware drives several stepper drivers from one fixed wiring harness, selectable from a dropdown in the web UI (`motor_driver_t` in `main/motor.h`):
+
+| Driver | Interface | What the firmware controls |
+|---|---|---|
+| TMC2208 | UART | current, microsteps, chopper mode (all via register writes) |
+| TMC2209 | UART | same config registers as the 2208 for our purposes; auto-detected from `VERSION` (0x21 vs 0x20) |
+| A4988 | STEP/DIR/EN | motion only — current is the board trimpot, microsteps are MS jumpers |
+| DRV8825 | STEP/DIR/EN | motion only; same as A4988 but also 1/32 microstepping |
+
+Key facts that shape the design:
+- **STEP/DIR/EN is the universal common denominator** — the motion engine in `motor.c` is identical for every driver. Only *configuration* differs.
+- **Legacy boards (A4988/DRV8825) have no UART.** `motor_configure()` short-circuits for them: it logs and keeps `microsteps` only as a *declaration* of the jumper setting so step-count/ramp math stays correct. It does **not** drive MS pins (they're not wired). The web UI greys out current/max-torque/chopper for these drivers.
+- **Software MS-pin control is a deliberately-deferred extension point.** To let the dropdown set microstepping on legacy boards, wire 2–3 spare GPIOs to MS1/MS2/MS3 and add a third config path; the `motor_configure()` legacy branch is where it would go.
+- **SPI-class TMC (2130/5160) are out of scope** — they need a 4-wire SPI harness, not the current UART pins.
+- Physical caveat: the StepStick footprint reuses pin positions across drivers, so when swapping a board you sometimes snip/leave-unconnected a conflicting pin (e.g. `MS3`/`RST` vs UART/DIAG). The harness is point-to-point per driver, so this is a per-swap hardware step, not a firmware concern.
 
 ## Hardware
 
