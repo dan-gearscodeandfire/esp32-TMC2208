@@ -56,7 +56,10 @@ static esp_err_t wifi_sta_connect(void)
     s_wifi_eg = xEventGroupCreate();
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
-    esp_netif_create_default_wifi_sta();
+    // Capture the netif so we can set our hostname before DHCP starts -- this
+    // is what the router's client list (and any mDNS scanner) will see.
+    esp_netif_t *sta_netif = esp_netif_create_default_wifi_sta();
+    ESP_ERROR_CHECK(esp_netif_set_hostname(sta_netif, "tmc_stepper_tester"));
 
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));
@@ -83,7 +86,7 @@ static esp_err_t wifi_sta_connect(void)
 static const char PAGE[] =
 "<!doctype html><html><head>"
 "<meta name='viewport' content='width=device-width,initial-scale=1'>"
-"<title>shopsmartfan</title>"
+"<title>TMC2208/2209 Tester</title>"
 "<style>"
 "body{font-family:sans-serif;max-width:620px;margin:1em auto;padding:0 1em;color:#222}"
 "h2{margin:.3em 0}legend{font-weight:bold}"
@@ -97,7 +100,7 @@ static const char PAGE[] =
 "button{font-size:1em;padding:.5em 1em;margin:.3em .2em 0 0}"
 "fieldset{border:1px solid #ccc;border-radius:6px;margin:.7em 0;padding:.4em .8em}"
 "</style></head><body>"
-"<h2>shopsmartfan</h2>"
+"<h2>TMC2208/2209 Tester</h2>"
 "<div id='st'>status...</div>"
 
 "<fieldset><legend>Motor</legend>"
